@@ -67,6 +67,7 @@ export default {
       backgroundImage: {
         'gradient-yarn': 'var(--gradient-yarn)',
         'gradient-subtle': 'var(--gradient-subtle)',
+        'gradient-animated': 'var(--gradient-animated)',
       },
       borderRadius: {
         lg: "var(--radius)",
@@ -90,10 +91,22 @@ export default {
             height: "0",
           },
         },
+        "gradient-move": {
+          "0%": {
+            backgroundPosition: "0% 50%",
+          },
+          "50%": {
+            backgroundPosition: "100% 50%",
+          },
+          "100%": {
+            backgroundPosition: "0% 50%",
+          },
+        },
       },
       animation: {
         "accordion-down": "accordion-down 0.2s ease-out",
         "accordion-up": "accordion-up 0.2s ease-out",
+        "gradient-move": "gradient-move 8s ease-in-out infinite",
       },
     },
   },
