@@ -1,7 +1,21 @@
+import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import meetingIllustration from "@/assets/meeting-illustration.png";
+import JoinYarnDialog from "./JoinYarnDialog";
 
 const HeroSection = () => {
+  const [showJoinDialog, setShowJoinDialog] = useState(false);
+  const navigate = useNavigate();
+
+  const handleCreateYarn = () => {
+    navigate("/meeting");
+  };
+
+  const handleJoinYarn = () => {
+    setShowJoinDialog(true);
+  };
+
   return (
     <section className="flex-1 flex items-center justify-between px-6 py-12">
       <div className="flex-1 max-w-2xl">
@@ -20,6 +34,7 @@ const HeroSection = () => {
             size="lg" 
             className="bg-yarn-purple/20 text-yarn-dark border border-yarn-dark hover:bg-yarn-purple/30 px-8 py-3 rounded-full"
             variant="outline"
+            onClick={handleCreateYarn}
           >
             Create a yarn
           </Button>
@@ -27,10 +42,16 @@ const HeroSection = () => {
             size="lg" 
             className="bg-yarn-blue/20 text-yarn-dark border border-yarn-dark hover:bg-yarn-blue/30 px-8 py-3 rounded-full"
             variant="outline"
+            onClick={handleJoinYarn}
           >
             Join a yarn
           </Button>
         </div>
+        
+        <JoinYarnDialog 
+          open={showJoinDialog} 
+          onOpenChange={setShowJoinDialog} 
+        />
       </div>
       
       <div className="flex-1 flex justify-center items-center">
