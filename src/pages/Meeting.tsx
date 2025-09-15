@@ -22,7 +22,7 @@ const Meeting = () => {
   const [isVideoOff, setIsVideoOff] = useState(false);
   const [message, setMessage] = useState("");
   const [messages] = useState([
-    { id: 1, user: "AI Assistant", content: "Welcome to your Yarn meeting! I'm here to help take notes and answer questions.", isAI: true },
+    { id: 1, user: "Olio", content: "Welcome to your Yarn meeting! I'm here to help take notes and answer questions.", isAI: true },
     { id: 2, user: "John", content: "Thanks for joining everyone!", isAI: false },
   ]);
 
@@ -151,7 +151,7 @@ const Meeting = () => {
           {/* AI Status */}
           <div className="flex items-center space-x-2 text-sm text-yarn-text">
             <Volume2 className="w-4 h-4" />
-            <span>AI Listening to the conversation</span>
+            <span>Olio is listening to the conversation</span>
           </div>
         </div>
 
