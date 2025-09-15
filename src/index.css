@@ -45,7 +45,6 @@ All colors MUST be HSL.
     /* Gradients */
     --gradient-yarn: linear-gradient(135deg, hsl(var(--yarn-purple)), hsl(60 20% 96%) 50%, hsl(var(--yarn-blue)));
     --gradient-subtle: linear-gradient(180deg, hsl(var(--yarn-purple) / 0.1), hsl(60 20% 96%) 50%, hsl(var(--yarn-blue) / 0.1));
-    --gradient-animated: linear-gradient(-45deg, hsl(var(--yarn-purple)), hsl(60 20% 96%) 30%, hsl(var(--yarn-blue)), hsl(var(--yarn-purple)) 70%, hsl(60 20% 96%));
 
     --radius: 0.5rem;
 
