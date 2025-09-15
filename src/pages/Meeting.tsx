@@ -183,7 +183,7 @@ const Meeting = () => {
           <div className="p-4 border-t border-border">
             <div className="flex items-center space-x-2">
               <Input
-                placeholder="Talk to AI..."
+                placeholder="Talk to Olio..."
                 value={message}
                 onChange={(e) => setMessage(e.target.value)}
                 onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
