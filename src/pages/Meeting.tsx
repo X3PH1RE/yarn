@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { createSocketConnection, Participant } from "@/lib/realtime";
 import { 
   Phone, 
   Mic, 
@@ -18,26 +20,109 @@ import {
 } from "lucide-react";
 
 const Meeting = () => {
+  const { roomId } = useParams();
+  const navigate = useNavigate();
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(false);
   const [message, setMessage] = useState("");
-  const [messages] = useState([
-    { id: 1, user: "Olio", content: "Welcome to your Yarn meeting! I'm here to help take notes and answer questions.", isAI: true },
-    { id: 2, user: "John", content: "Thanks for joining everyone!", isAI: false },
-  ]);
+  const [messages, setMessages] = useState<{ id: number; user: string; content: string }[]>([]);
+  const [participants, setParticipants] = useState<Participant[]>([]);
+  const [systemInfo, setSystemInfo] = useState<string | null>(null);
+  const [selfId, setSelfId] = useState<string | null>(null);
+  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const localVideoRef = useRef<HTMLVideoElement | null>(null);
 
-  const participants = [
-    { id: 1, name: "User 1", isActive: true, isMuted: false },
-    { id: 2, name: "User 2", isActive: true, isMuted: true },
-    { id: 3, name: "User 3", isActive: false, isMuted: false },
-    { id: 4, name: "User 4", isActive: false, isMuted: false },
-  ];
+  const serverUrl = useMemo(() => {
+    return (import.meta as any).env.VITE_SERVER_URL || "http://localhost:5174";
+  }, []);
+  const socket = useMemo(() => createSocketConnection(serverUrl), [serverUrl]);
+
+  useEffect(() => {
+    if (!roomId) return;
+
+    socket.emit("room:join", { roomId });
+
+    const onConnect = () => setSelfId(socket.id);
+    const onParticipants = (list: Participant[]) => setParticipants(list);
+    const onSystem = (msg: string) => setSystemInfo(msg);
+    const onChat = (payload: { id: number; user: string; content: string }) => {
+      setMessages((prev) => [...prev, payload]);
+    };
+
+    socket.on("connect", onConnect);
+    socket.on("participants:update", onParticipants);
+    socket.on("system:info", onSystem);
+    socket.on("chat:message", onChat);
+
+    return () => {
+      socket.emit("room:leave");
+      socket.off("connect", onConnect);
+      socket.off("participants:update", onParticipants);
+      socket.off("system:info", onSystem);
+      socket.off("chat:message", onChat);
+      socket.disconnect();
+    };
+  }, [roomId, socket]);
+
+  // Get local media on mount
+  useEffect(() => {
+    let isMounted = true;
+    const startMedia = async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        if (!isMounted) return;
+        setLocalStream(stream);
+        if (localVideoRef.current) {
+          localVideoRef.current.srcObject = stream;
+          await localVideoRef.current.play().catch(() => {});
+        }
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error("Failed to get user media", err);
+      }
+    };
+    startMedia();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   const handleSendMessage = () => {
+    if (!roomId) return;
     if (message.trim()) {
-      // In a real app, this would send the message
+      socket.emit("chat:message", { roomId, user: "You", message });
       setMessage("");
     }
+  };
+
+  const handleToggleMute = () => {
+    setIsMuted((prev) => {
+      const next = !prev;
+      if (localStream) {
+        localStream.getAudioTracks().forEach((t) => (t.enabled = !next));
+      }
+      return next;
+    });
+  };
+
+  const handleToggleVideo = () => {
+    setIsVideoOff((prev) => {
+      const next = !prev;
+      if (localStream) {
+        localStream.getVideoTracks().forEach((t) => (t.enabled = !next));
+      }
+      return next;
+    });
+  };
+
+  const handleEndCall = () => {
+    if (localStream) {
+      localStream.getTracks().forEach((t) => t.stop());
+      setLocalStream(null);
+    }
+    socket.emit("room:leave");
+    socket.disconnect();
+    navigate("/");
   };
 
   return (
@@ -46,37 +131,36 @@ const Meeting = () => {
       <div className="flex-1 flex flex-col p-4">
         {/* Video Grid */}
         <div className="flex-1 grid grid-cols-2 gap-4 mb-4">
-          {participants.map((participant, index) => (
+          {participants.map((participant) => (
             <div
-              key={participant.id}
+              key={participant.socketId}
               className="relative bg-muted rounded-xl overflow-hidden aspect-video border-2 border-border"
             >
               {/* Video placeholder */}
-              <div className="w-full h-full bg-gradient-to-br from-yarn-purple/10 to-yarn-blue/10 flex items-center justify-center">
-                <div className="text-center">
-                  <div className="w-16 h-16 bg-yarn-dark rounded-full flex items-center justify-center mb-2 mx-auto">
-                    <span className="text-white font-bold text-xl">
-                      {participant.name.slice(-1)}
+              {participant.socketId === selfId ? (
+                <video
+                  ref={localVideoRef}
+                  className="w-full h-full object-cover"
+                  muted
+                  playsInline 
+                  autoPlay
+                />
+              ) : (
+                <div className="w-full h-full bg-gradient-to-br from-yarn-purple/10 to-yarn-blue/10 flex items-center justify-center">
+                  <div className="text-center">
+                    <div className="w-16 h-16 bg-yarn-dark rounded-full flex items-center justify-center mb-2 mx-auto">
+                      <span className="text-white font-bold text-xl">{(participant.name ?? participant.socketId).slice(-1)}</span>
+                    </div>
+                    <span className="text-sm font-medium text-yarn-text">
+                      {participant.name ?? participant.socketId}
                     </span>
                   </div>
-                  <span className="text-sm font-medium text-yarn-text">
-                    {participant.name}
-                  </span>
                 </div>
-              </div>
+              )}
               
               {/* User controls overlay */}
               <div className="absolute bottom-2 left-2 flex items-center space-x-2">
-                {participant.isMuted && (
-                  <div className="w-6 h-6 bg-red-500 rounded-full flex items-center justify-center">
-                    <MicOff className="w-3 h-3 text-white" />
-                  </div>
-                )}
-                {!participant.isActive && (
-                  <div className="w-6 h-6 bg-gray-500 rounded-full flex items-center justify-center">
-                    <VideoOff className="w-3 h-3 text-white" />
-                  </div>
-                )}
+                {/* In a later step, bind actual mute/video states per participant */}
               </div>
             </div>
           ))}
@@ -89,6 +173,7 @@ const Meeting = () => {
               size="sm"
               variant="destructive"
               className="rounded-full w-12 h-12 p-0"
+              onClick={handleEndCall}
             >
               <Phone className="w-5 h-5" />
             </Button>
@@ -97,9 +182,18 @@ const Meeting = () => {
               size="sm"
               variant={isMuted ? "destructive" : "secondary"}
               className="rounded-full w-12 h-12 p-0"
-              onClick={() => setIsMuted(!isMuted)}
+              onClick={handleToggleMute}
             >
               {isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+            </Button>
+
+            <Button
+              size="sm"
+              variant={isVideoOff ? "destructive" : "secondary"}
+              className="rounded-full w-12 h-12 p-0"
+              onClick={handleToggleVideo}
+            >
+              {isVideoOff ? <VideoOff className="w-5 h-5" /> : <Video className="w-5 h-5" />}
             </Button>
             
             <Button
@@ -159,11 +253,14 @@ const Meeting = () => {
         <div className="flex-1 flex flex-col">
           <ScrollArea className="flex-1 p-4">
             <div className="space-y-4">
+              {systemInfo && (
+                <div className="p-2 text-xs text-yarn-text">{systemInfo}</div>
+              )}
               {messages.map((msg) => (
                 <div
                   key={msg.id}
                   className={`p-3 rounded-lg ${
-                    msg.isAI
+                    msg.user === "You"
                       ? "bg-yarn-purple/10 border border-yarn-purple/20"
                       : "bg-muted"
                   }`}

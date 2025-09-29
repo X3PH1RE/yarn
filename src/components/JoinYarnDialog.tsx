@@ -22,8 +22,7 @@ const JoinYarnDialog = ({ open, onOpenChange }: JoinYarnDialogProps) => {
 
   const handleJoin = () => {
     if (yarnCode.trim()) {
-      // In a real app, this would validate the code
-      navigate("/meeting");
+      navigate(`/meeting/${yarnCode.trim()}`);
       onOpenChange(false);
     }
   };

@@ -9,7 +9,8 @@ const HeroSection = () => {
   const navigate = useNavigate();
 
   const handleCreateYarn = () => {
-    navigate("/meeting");
+    const roomId = Math.random().toString(36).slice(2, 8);
+    navigate(`/meeting/${roomId}`);
   };
 
   const handleJoinYarn = () => {
