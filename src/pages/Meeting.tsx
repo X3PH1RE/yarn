@@ -43,7 +43,13 @@ const Meeting = () => {
   const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({});
 
   const serverUrl = useMemo(() => {
-    return (import.meta as any).env.VITE_SERVER_URL || "http://localhost:5174";
+    const envUrl = import.meta.env.VITE_SERVER_URL;
+    if (envUrl) {
+      console.log('Using backend URL from environment:', envUrl);
+      return envUrl;
+    }
+    console.warn('VITE_SERVER_URL not set, using localhost fallback');
+    return "http://localhost:5174";
   }, []);
   const socket = useMemo(() => createSocketConnection(serverUrl), [serverUrl]);
 
