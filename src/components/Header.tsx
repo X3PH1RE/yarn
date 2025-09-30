@@ -1,15 +1,15 @@
 import { Button } from "@/components/ui/button";
+import logoImage from "@/assets/ChatGPT_Image_Jul_28__2025__10_52_25_PM-removebg-preview.png";
 
 const Header = () => {
   return (
     <header className="flex items-center justify-between p-6">
-      <div className="flex items-center space-x-2">
-        <div className="w-8 h-8 bg-yarn-dark rounded-full flex items-center justify-center">
-          <svg className="w-5 h-5 text-white" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
-          </svg>
-        </div>
-        <span className="text-2xl font-bold text-yarn-dark">Yarn</span>
+      <div className="flex items-center space-x-3">
+        <img 
+          src={logoImage} 
+          alt="Yarn Logo" 
+          className="h-12 w-auto"
+        />
       </div>
       
       <nav className="hidden md:flex items-center space-x-8">
