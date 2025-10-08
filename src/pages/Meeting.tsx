@@ -3,7 +3,8 @@ import { useNavigate, useParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { createSocketConnection, Participant } from "@/lib/realtime";
+import { createSocketConnection, Participant, TranscriptionSegment, AIQuestion, TranscriptionUpdate, AIAnswer, AIQuestionAsked } from "@/lib/realtime";
+import AudioCapture from "@/lib/audioCapture";
 import { 
   Phone, 
   Mic, 
@@ -29,6 +30,11 @@ const Meeting = () => {
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [systemInfo, setSystemInfo] = useState<string | null>(null);
   const [selfId, setSelfId] = useState<string | null>(null);
+  const [transcription, setTranscription] = useState<TranscriptionSegment[]>([]);
+  const [aiQuestions, setAiQuestions] = useState<AIQuestion[]>([]);
+  const [aiQuestion, setAiQuestion] = useState("");
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [aiContext, setAiContext] = useState("");
   const [displayName] = useState<string>(() => {
     const existing = localStorage.getItem("yarnDisplayName");
     if (existing && existing.trim()) return existing;
@@ -38,9 +44,10 @@ const Meeting = () => {
   });
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
-  const [activeTab, setActiveTab] = useState<'ai' | 'chat' | 'participants'>('chat');
+  const [activeTab, setActiveTab] = useState<'ai' | 'chat' | 'participants' | 'transcription'>('chat');
   const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({});
+  const audioCaptureRef = useRef<AudioCapture | null>(null);
 
   const serverUrl = useMemo(() => {
     const envUrl = import.meta.env.VITE_SERVER_URL;
@@ -52,6 +59,44 @@ const Meeting = () => {
     return "http://localhost:5174";
   }, []);
   const socket = useMemo(() => createSocketConnection(serverUrl), [serverUrl]);
+
+  // Initialize audio capture
+  useEffect(() => {
+    if (roomId && socket) {
+      console.log('🔧 Initializing local transcription for room:', roomId);
+      audioCaptureRef.current = new AudioCapture(socket, roomId);
+      
+      // Set up transcription callback
+      audioCaptureRef.current.setTranscriptionCallback((segment) => {
+        console.log('🎤 Received local transcription:', segment);
+        setTranscription(prev => [...prev, segment]);
+        setIsTranscribing(true);
+      });
+      
+      console.log('🔧 Local transcription initialized:', audioCaptureRef.current);
+    } else {
+      console.log('🔧 Cannot initialize transcription - roomId:', roomId, 'socket:', socket);
+    }
+  }, [roomId, socket]);
+
+  // Update AI context when transcription changes and send to server
+  useEffect(() => {
+    if (transcription.length > 0) {
+      const context = transcription
+        .map(seg => `${seg.speaker}: ${seg.text}`)
+        .join('\n');
+      setAiContext(context);
+      console.log('🔧 Updated AI context:', context);
+      
+      // Send transcription to server for AI processing
+      if (roomId) {
+        socket.emit("transcription:update", {
+          roomId,
+          transcription: transcription
+        });
+      }
+    }
+  }, [transcription, roomId, socket]);
 
   // WebRTC config and helpers
   const rtcConfig = useMemo(() => ({
@@ -163,11 +208,39 @@ const Meeting = () => {
     const onChat = (payload: { id: number; user: string; content: string }) => {
       setMessages((prev) => [...prev, payload]);
     };
+    const onTranscriptionUpdate = (data: TranscriptionUpdate) => {
+      setTranscription(data.fullTranscription);
+      setIsTranscribing(true);
+    };
+    const onTranscriptionHistory = (history: TranscriptionSegment[]) => {
+      setTranscription(history);
+    };
+    const onAIAnswer = (data: AIAnswer) => {
+      // Handle AI answer
+      console.log('AI Answer:', data);
+    };
+    const onAIQuestionAsked = (data: AIQuestionAsked) => {
+      // Add to AI questions list
+      setAiQuestions(prev => [...prev, {
+        id: Date.now().toString(),
+        question: data.question,
+        answer: data.answer,
+        timestamp: data.timestamp
+      }]);
+    };
+    const onAIQuestions = (questions: AIQuestion[]) => {
+      setAiQuestions(questions);
+    };
 
     socket.on("connect", onConnect);
     socket.on("participants:update", onParticipants);
     socket.on("system:info", onSystem);
     socket.on("chat:message", onChat);
+    socket.on("transcription:update", onTranscriptionUpdate);
+    socket.on("transcription:history", onTranscriptionHistory);
+    socket.on("ai:answer", onAIAnswer);
+    socket.on("ai:question-asked", onAIQuestionAsked);
+    socket.on("ai:questions", onAIQuestions);
 
     return () => {
       socket.emit("room:leave");
@@ -175,10 +248,20 @@ const Meeting = () => {
       socket.off("participants:update", onParticipants);
       socket.off("system:info", onSystem);
       socket.off("chat:message", onChat);
+      socket.off("transcription:update", onTranscriptionUpdate);
+      socket.off("transcription:history", onTranscriptionHistory);
+      socket.off("ai:answer", onAIAnswer);
+      socket.off("ai:question-asked", onAIQuestionAsked);
+      socket.off("ai:questions", onAIQuestions);
       socket.disconnect();
       peerConnectionsRef.current.forEach((pc) => pc.close());
       peerConnectionsRef.current.clear();
       setRemoteStreams({});
+      
+      // Stop audio capture
+      if (audioCaptureRef.current) {
+        audioCaptureRef.current.stopCapture();
+      }
     };
   }, [roomId, socket, displayName]);
 
@@ -193,6 +276,18 @@ const Meeting = () => {
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = stream;
           await localVideoRef.current.play().catch(() => {});
+        }
+        
+        // Start audio capture for transcription
+        if (audioCaptureRef.current) {
+          try {
+            await audioCaptureRef.current.startCapture();
+            console.log('✅ Audio capture started successfully');
+          } catch (error) {
+            console.error('❌ Failed to start audio capture:', error);
+          }
+        } else {
+          console.error('❌ Audio capture not initialized');
         }
       } catch (err) {
         // eslint-disable-next-line no-console
@@ -251,9 +346,25 @@ const Meeting = () => {
       localStream.getTracks().forEach((t) => t.stop());
       setLocalStream(null);
     }
+    if (audioCaptureRef.current) {
+      audioCaptureRef.current.stopCapture();
+    }
     socket.emit("room:leave");
     socket.disconnect();
     navigate("/");
+  };
+
+  const handleAIQuestion = () => {
+    if (!roomId || !aiQuestion.trim()) return;
+    
+    // Send question to server for real AI processing
+    socket.emit("ai:question", {
+      roomId,
+      question: aiQuestion.trim(),
+      userId: displayName
+    });
+    
+    setAiQuestion("");
   };
 
   return (
@@ -399,6 +510,9 @@ const Meeting = () => {
               <Button size="sm" variant={activeTab === 'chat' ? 'secondary' : 'ghost'} className="w-8 h-8 p-0" onClick={() => setActiveTab('chat')}>
                 <MessageCircle className="w-4 h-4" />
               </Button>
+              <Button size="sm" variant={activeTab === 'transcription' ? 'secondary' : 'ghost'} className="w-8 h-8 p-0" onClick={() => setActiveTab('transcription')}>
+                <Volume2 className="w-4 h-4" />
+              </Button>
               <Button size="sm" variant={activeTab === 'participants' ? 'secondary' : 'ghost'} className="w-8 h-8 p-0" onClick={() => setActiveTab('participants')}>
                 <Users className="w-4 h-4" />
               </Button>
@@ -408,16 +522,147 @@ const Meeting = () => {
           {/* AI Status */}
           <div className="flex items-center space-x-2 text-sm text-yarn-text">
             <Volume2 className="w-4 h-4" />
-            <span>Olio is listening to the conversation</span>
+            <span>{isTranscribing ? "Olio is listening and transcribing" : "Olio is ready to listen"}</span>
+          </div>
+          
+          {/* Debug Buttons */}
+          <div className="mt-2 space-x-2">
+            <Button 
+              size="sm" 
+              variant="outline" 
+              onClick={async () => {
+                console.log('🔧 Test Audio button clicked');
+                console.log('🔧 Audio capture ref:', audioCaptureRef.current);
+                console.log('🔧 Web Speech API support:', 'webkitSpeechRecognition' in window || 'SpeechRecognition' in window);
+                
+                if (audioCaptureRef.current) {
+                  try {
+                    console.log('🔧 Starting local transcription...');
+                    await audioCaptureRef.current.startCapture();
+                    console.log('✅ Local transcription started');
+                  } catch (error) {
+                    console.error('❌ Local transcription failed:', error);
+                  }
+                } else {
+                  console.error('❌ Audio capture ref is null');
+                }
+              }}
+            >
+              Test Transcription
+            </Button>
+            
+            <Button 
+              size="sm" 
+              variant="outline" 
+              onClick={() => {
+                const testTexts = [
+                  "Hello everyone, welcome to our project meeting",
+                  "We need to discuss the budget for next quarter",
+                  "The deadline for the project is next Friday",
+                  "I think we should focus on the user interface first",
+                  "What are your thoughts on the timeline?",
+                  "We have made good progress this week",
+                  "The client is happy with our proposal",
+                  "Let's schedule another meeting for next week"
+                ];
+                
+                const randomText = testTexts[Math.floor(Math.random() * testTexts.length)];
+                const fakeSegment = {
+                  id: 'test-' + Date.now(),
+                  speaker: 'Speaker ' + (Math.floor(Math.random() * 3) + 1),
+                  text: randomText,
+                  timestamp: Date.now(),
+                  confidence: 0.85 + Math.random() * 0.1
+                };
+                setTranscription(prev => [...prev, fakeSegment]);
+                console.log('🔧 Added random test transcription:', randomText);
+              }}
+            >
+              Add Random Text
+            </Button>
+            
+            <Button 
+              size="sm" 
+              variant="outline" 
+              onClick={() => {
+                console.log('🔧 Current AI context:', aiContext);
+                alert('AI Context:\n' + aiContext);
+              }}
+            >
+              Show Context
+            </Button>
+            
+            <div className="mt-2">
+              <Input
+                placeholder="Type what you want to say..."
+                onKeyPress={(e) => {
+                  if (e.key === 'Enter' && e.currentTarget.value.trim()) {
+                    const text = e.currentTarget.value.trim();
+                    const fakeSegment = {
+                      id: 'manual-' + Date.now(),
+                      speaker: 'You',
+                      text: text,
+                      timestamp: Date.now(),
+                      confidence: 0.95
+                    };
+                    setTranscription(prev => [...prev, fakeSegment]);
+                    e.currentTarget.value = '';
+                    console.log('🔧 Added manual transcription:', text);
+                  }
+                }}
+                className="text-sm"
+              />
+            </div>
           </div>
         </div>
 
         {/* Sidebar Content */}
         <div className="flex-1 flex flex-col">
           {activeTab === 'ai' && (
-            <div className="flex-1 p-4 text-sm text-yarn-text">
-              Coming soon: Ask Olio questions about your meeting in real time.
-            </div>
+            <>
+              <ScrollArea className="flex-1 p-4">
+                <div className="space-y-4">
+                  {aiQuestions.map((qa) => (
+                    <div key={qa.id} className="p-3 rounded-lg bg-muted">
+                      <div className="font-medium text-sm text-yarn-dark mb-2">
+                        Q: {qa.question}
+                      </div>
+                      <div className="text-sm text-yarn-text">
+                        A: {qa.answer}
+                      </div>
+                      <div className="text-xs text-yarn-text/60 mt-2">
+                        {new Date(qa.timestamp).toLocaleTimeString()}
+                      </div>
+                    </div>
+                  ))}
+                  {aiQuestions.length === 0 && (
+                    <div className="text-center text-yarn-text/60 py-8">
+                      No AI questions yet. Ask Olio about the meeting!
+                    </div>
+                  )}
+                </div>
+              </ScrollArea>
+
+              {/* AI Question Input */}
+              <div className="p-4 border-t border-border">
+                <div className="space-y-2">
+                  <Input
+                    placeholder="Ask Olio about the meeting..."
+                    value={aiQuestion}
+                    onChange={(e) => setAiQuestion(e.target.value)}
+                    onKeyPress={(e) => e.key === 'Enter' && handleAIQuestion()}
+                    className="flex-1"
+                  />
+                  <Button
+                    onClick={handleAIQuestion}
+                    disabled={!aiQuestion.trim()}
+                    className="w-full bg-yarn-purple/20 text-yarn-dark border border-yarn-dark hover:bg-yarn-purple/30"
+                  >
+                    Ask Olio
+                  </Button>
+                </div>
+              </div>
+            </>
           )}
 
           {activeTab === 'chat' && (
@@ -467,6 +712,36 @@ const Meeting = () => {
                 </div>
               </div>
             </>
+          )}
+
+          {activeTab === 'transcription' && (
+            <ScrollArea className="flex-1 p-4">
+              <div className="space-y-3">
+                {transcription.map((segment) => (
+                  <div key={segment.id} className="p-3 rounded-lg bg-muted">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="font-medium text-sm text-yarn-dark">
+                        {segment.speaker}
+                      </span>
+                      <span className="text-xs text-yarn-text/60">
+                        {new Date(segment.timestamp).toLocaleTimeString()}
+                      </span>
+                    </div>
+                    <div className="text-sm text-yarn-text">
+                      {segment.text}
+                    </div>
+                    <div className="text-xs text-yarn-text/60 mt-1">
+                      Confidence: {Math.round(segment.confidence * 100)}%
+                    </div>
+                  </div>
+                ))}
+                {transcription.length === 0 && (
+                  <div className="text-center text-yarn-text/60 py-8">
+                    No transcription yet. Start speaking to see real-time transcription!
+                  </div>
+                )}
+              </div>
+            </ScrollArea>
           )}
 
           {activeTab === 'participants' && (
