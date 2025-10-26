@@ -1,180 +1,199 @@
-import asyncio
 import os
-from contextlib import asynccontextmanager
-from typing import List, Dict
+import json
+import asyncio
+from typing import List, Dict, Any
+from datetime import datetime
+import re
+import uuid
+import io
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware  # <-- FIXED TYPO HERE
+# FastAPI and dependencies
+from fastapi import FastAPI, HTTPException, File, UploadFile, Form
+# FIX: Corrected import casing from 'CORSMiddleware' to 'CORSMiddleware'
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-# --- CONFIGURATION & SETUP ---
+# Gemini SDK (Requires google-genai)
+import google.generativeai as genai
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
+from dotenv import load_dotenv
 
-# Use your actual API key here. Leave it as "MOCK_KEY_REPLACE_ME" if you want to use the mock client.
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "MOCK_KEY_REPLACE_ME")
+# --- Environment Variable Setup ---
+load_dotenv()
+GEMINI_API_KEY = "AIzaSyAQl9SQ2RCr8vTW7QHpnC09Yna8UZp-Si4"
 
-# In-memory store to simulate a database containing the full transcript
-TRANSCRIPT_STORE: List[Dict[str, str]] = []
-
-# --- MOCK GEMINI CLIENT ---
-
-class MockGeminiClient:
-    """Simulates the Gemini API client for local testing and data flow validation."""
-    def __init__(self, api_key: str):
-        self.is_mock = api_key == "MOCK_KEY_REPLACE_ME"
-
-    async def generate_content(self, system_prompt: str, user_prompt: str) -> str:
-        """Mocks the asynchronous API call with contextual responses."""
-        await asyncio.sleep(0.5) # Simulate network latency
-        
-        # Simple analysis of the user prompt to return contextual mock responses
-        lower_prompt = user_prompt.lower()
-        
-        if "deployment" in lower_prompt or "vercel" in lower_prompt:
-            return "The team agreed on a two-part deployment strategy: **React on Vercel** for the frontend, and the **Python backend** as a separate API service to securely manage Deepgram and Gemini calls."
-        elif "who was speaking" in lower_prompt or "participants" in lower_prompt:
-            return "The speakers identified in the provided context were Ashwin VC, Lekshmi Priya M, and Austin Benny."
-        elif "summarize" in lower_prompt:
-            return "The meeting summary is that the team finalized the architecture: Vercel for the React frontend, and a dedicated Python service for the AI and real-time APIs."
-        else:
-            return "Mock AI Response: Your query has been successfully processed by the simulated AI. This confirms the API endpoint is working correctly."
-
-GEMINI_CLIENT = MockGeminiClient(GEMINI_API_KEY)
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup: Pre-populate TRANSCRIPT_STORE for direct REST testing
-    global TRANSCRIPT_STORE
-    TRANSCRIPT_STORE = [
-        {"user": "Ashwin VC", "content": "Okay, let's start the weekly project sync. The main goal today is to finalize the deployment strategy."},
-        {"user": "Lekshmi Priya M", "content": "I've been looking into serverless options. Vercel seems like the most straightforward choice for our React frontend."},
-        {"user": "Austin Benny", "content": "We need the Python layer to handle Deepgram and Gemini API calls securely. Final decision is: React on Vercel, Python backend as a separate API service."},
-    ]
-    print(f"FastAPI started. Transcript store pre-populated with {len(TRANSCRIPT_STORE)} lines for direct testing.")
-    yield
-    print("FastAPI server shutting down...")
-
+# --- FastAPI App Initialization ---
 app = FastAPI(
-    title="Yarn AI Meeting Backend",
-    version="1.0.0",
-    description="FastAPI service for Deepgram Transcription and Gemini AI context.",
-    lifespan=lifespan
+    title="Yarn Audio Demo Backend",
+    description="Demo API for Audio Transcription and Contextual Analysis using Gemini API.",
+    version="1.0.0"
 )
 
-# Configure CORS (Essential for React to communicate with FastAPI locally)
-origins = ["*",] 
+# --- CORS Configuration ---
+origins = ["*"] # Allow all for local demo testing
+# The class used here (CORSMiddleware) is now correctly imported above.
 app.add_middleware(
-    CORSMiddleware, # <-- CORRECTED HERE
+    CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- Pydantic Schemas ---
+# --- API Client Initialization ---
+if not GEMINI_API_KEY:
+    print("FATAL ERROR: GEMINI_API_KEY is not set. AI functions will fail.")
+try:
+    genai.configure(api_key=GEMINI_API_KEY)
+except Exception as e:
+    print(f"FATAL: Gemini configuration failed: {e}")
 
-class AIQueryRequest(BaseModel):
-    query: str = Field(..., description="The user's question about the transcript.")
 
-class AIQueryResponse(BaseModel):
-    response: str = Field(..., description="The AI's context-aware answer.")
+# --- Pydantic Models for Demo ---
 
-# --- CORE AI CALL FUNCTION ---
+# Model for a single mock transcript entry (timestamp is simple string here)
+class DemoTranscriptEntry(BaseModel):
+    timestamp: str
+    speaker: str # Added for structural completeness
+    content: str
 
-async def get_gemini_response(full_transcript: List[Dict[str, str]], query: str) -> str:
-    """Constructs the prompt and calls the (mocked/real) Gemini client."""
-    context_lines = [f"{item['user']}: {item['content']}" for item in full_transcript]
-    full_context = "\n".join(context_lines)
+# Model for the incoming query with full context (used by the client for follow-up questions)
+class QueryAnalysisRequest(BaseModel):
+    transcript_context: List[DemoTranscriptEntry] = Field(..., description="The full transcribed audio content.")
+    user_query: str = Field(..., description="The user's question about the transcript.")
+
+
+# --- CORE GEMINI FUNCTIONS ---
+
+async def _transcribe_audio_to_text(audio_file: UploadFile) -> str:
+    """Sends audio file to Gemini for transcription."""
+    print("Step 1.1: Reading audio bytes...")
+    audio_bytes = await audio_file.read()
     
-    system_prompt = (
-        "You are Olio, an AI meeting assistant. Your task is to provide concise, "
-        "context-aware answers based ONLY on the provided meeting transcript. "
-        "Do not invent information. If the answer is not in the transcript, state that clearly."
+    # Using the most reliable model for multimodal file processing
+    transcription_model = genai.GenerativeModel('gemini-2.5-flash')
+    
+    audio_part = {"mime_type": audio_file.content_type, "data": audio_bytes}
+    
+    # Send the audio part along with the instruction
+    print(f"Step 1.2: Sending {audio_file.filename} to Gemini for transcription...")
+    
+    # Use asyncio.to_thread to run synchronous SDK method safely in FastAPI's thread pool
+    response = await asyncio.to_thread(
+        transcription_model.generate_content,
+        contents=["Transcribe the audio and return ONLY the raw spoken text.", audio_part]
+    )
+    
+    print("Step 1.3: Transcription received.")
+    return response.text.strip()
+
+
+async def get_contextual_response(full_transcript_text: str, query: str) -> str:
+    """Sends the full transcript text and user query to Gemini for analysis."""
+    
+    # This model name was already correct for analysis
+    analysis_model = genai.GenerativeModel('gemini-2.5-flash')
+    
+    system_prompt_instruction = (
+        "You are Olio, an expert meeting analyst. Your task is to provide concise, "
+        "accurate, and context-aware answers. You MUST ground your answer ONLY on the "
+        "meeting transcript provided below. Do not use external knowledge. "
+        "If the answer is not explicitly stated in the transcript, state that clearly."
     )
     
     user_prompt = (
-        f"MEETING TRANSCRIPT CONTEXT:\n---\n{full_context}\n---\n\n"
+        f"INSTRUCTION: {system_prompt_instruction}\n\n" # FIX: Inject system instruction into the prompt
+        f"MEETING TRANSCRIPT:\n---\n{full_transcript_text}\n---\n\n"
         f"USER QUERY: {query}"
     )
     
-    return await GEMINI_CLIENT.generate_content(system_prompt, user_prompt)
+    print(f"Step 2.1: Sending context ({len(full_transcript_text)} chars) and query to Gemini for analysis...")
 
-# --- ENDPOINTS ---
+    # FIX: Removed the conflicting 'config' parameter. We pass the system instruction 
+    # directly in the prompt content above for maximum compatibility.
+    response = await asyncio.to_thread(
+        analysis_model.generate_content,
+        contents=[user_prompt]
+    )
+    
+    print("Step 2.2: Analysis received.")
+    return response.text.strip()
 
-@app.websocket("/ws/transcript")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    print(f"Client connected for transcription: {websocket.client}")
 
+# --- API Endpoints ---
+
+@app.post("/api/demo/analyze-audio", tags=["Demo - Audio Upload"])
+async def analyze_audio_demo(audio_file: UploadFile = File(...)):
+    """
+    Endpoint 1: Uploads an audio file, transcribes it using Gemini, and returns the raw text.
+    The client must use this text for subsequent queries.
+    """
+    if audio_file.content_type not in ["audio/mp3", "audio/wav", "audio/mpeg", "audio/webm"]:
+         raise HTTPException(status_code=400, detail="Invalid file type. Please upload a common audio file (mp3, wav, etc.).")
+    
     try:
-        dialogue = [
-            {"user": "Ashwin VC", "content": "Okay, let's start the weekly project sync. The main goal today is to finalize the deployment strategy."},
-            {"user": "Lekshmi Priya M", "content": "I've been looking into serverless options. Vercel seems like the most straightforward choice for our React frontend."},
-            {"user": "Austin Benny", "content": "We need the Python layer to handle Deepgram and Gemini API calls securely. Final decision is: React on Vercel, Python backend as a separate API service."},
-            {"user": "Ashwin VC", "content": "Agreed. The final decision is: React on Vercel, Python backend as a separate API service."},
+        # Step 1: Transcribe the audio using Gemini
+        final_transcript_text = await _transcribe_audio_to_text(audio_file)
+
+        # Step 2: Format the single text into a context list (for client consistency)
+        # We simplify the transcription as one block for this file-based demo.
+        transcribed_context = [
+            DemoTranscriptEntry(
+                timestamp=datetime.now().strftime("%H:%M:%S"),
+                speaker="Transcription",
+                content=final_transcript_text
+            )
         ]
         
-        global TRANSCRIPT_STORE
-        TRANSCRIPT_STORE.clear()
-        
-        await websocket.send_json({"user": "System", "content": "Transcription simulation started on backend.", "is_ai": False})
+        # Step 3: Run a default summary query for the client's immediate viewing
+        initial_query = "Provide a concise summary of this meeting transcript."
+        initial_analysis = await get_contextual_response(final_transcript_text, initial_query)
 
-        for item in dialogue:
-            await asyncio.sleep(1) 
-            if item["user"] != "System":
-                TRANSCRIPT_STORE.append(item)
-            await websocket.send_json({"user": item["user"], "content": item["content"], "is_ai": False})
-            
-        await websocket.send_json({"user": "System", "content": "Transcription finished. Context available for AI query.", "is_ai": False})
+        return {
+            "filename": audio_file.filename,
+            "transcription_status": "Complete",
+            "transcribed_text": final_transcript_text, # Raw text for follow-up query context
+            "initial_summary": initial_analysis,        # First answer for display
+            "full_context_list": transcribed_context,   # List format for /query-analysis endpoint
+        }
 
-        while True:
-            await websocket.receive_text()
-
-    except WebSocketDisconnect:
-        print(f"Client disconnected: {websocket.client}")
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"WebSocket Error: {e}")
-        await websocket.close()
-    finally:
-        print("WebSocket closed.")
+        print(f"Error during audio processing: {e}")
+        # Return a clear message if the model call failed
+        raise HTTPException(status_code=500, detail=f"Failed to process audio file: Gemini API Error. Check your model name or API key.")
 
-@app.post("/api/ai/query", response_model=AIQueryResponse)
-async def ai_query_handler(request: AIQueryRequest):
-    """Handles the user's conversational query about the transcript using the live store."""
-    if not request.query.strip():
+
+@app.post("/api/demo/query-analysis", tags=["Demo - Audio Upload"])
+async def query_analysis_demo(request: QueryAnalysisRequest):
+    """
+    Endpoint 2: Takes the full transcribed text context and a new user question, 
+    then sends both to Gemini for dynamic conversation.
+    """
+    if not request.user_query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
+        
+    # Reconstruct the single, continuous transcription text from the context list
+    # Since the initial transcription is returned as one large block, we just join the content.
+    full_transcript_text = "\n".join([entry.content for entry in request.transcript_context])
     
-    full_transcript = TRANSCRIPT_STORE
-    
-    if not full_transcript:
-        return AIQueryResponse(response="I cannot answer yet. The meeting transcript context is currently empty. Run the transcription first.")
+    if not full_transcript_text.strip():
+        raise HTTPException(status_code=400, detail="Context is empty. Please upload an audio file first.")
 
     try:
-        ai_response = await get_gemini_response(full_transcript, request.query)
-        return AIQueryResponse(response=ai_response)
+        # Send the continuous text and the new query for contextual analysis
+        analysis_result = await get_contextual_response(full_transcript_text, request.user_query)
+        
+        return JSONResponse(content={"analysis_result": analysis_result})
+        
     except Exception as e:
-        # If this fires, check the Uvicorn terminal for the full traceback
-        print(f"AI Query Error: {e}") 
-        raise HTTPException(status_code=500, detail="Error communicating with the AI service.")
+        print(f"Error during query analysis: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to perform query analysis: {e}")
 
 
-@app.post("/api/ai/test-gemini", response_model=AIQueryResponse, summary="Test Gemini Context Call Directly")
-async def test_gemini_handler(request: AIQueryRequest):
-    """Allows direct testing of the Gemini integration logic using a small, fixed transcript."""
-    # This transcript is for testing this endpoint specifically, separate from the live store
-    test_transcript = [
-        {"user": "John", "content": "We decided to move forward with the purple color scheme."},
-        {"user": "Jane", "content": "We set the budget at $10,000 for the first month."},
-    ]
-    
-    try:
-        ai_response = await get_gemini_response(test_transcript, request.query)
-        return AIQueryResponse(response=ai_response)
-    except Exception as e:
-        print(f"AI Test Endpoint Failed: {e}")
-        raise HTTPException(status_code=500, detail=f"AI Test Failed: {e}")
-
-@app.get("/status")
+@app.get("/status", tags=["Utility"])
 def get_status():
     """Simple health check endpoint."""
-    return {"status": "ok", "transcript_count": len(TRANSCRIPT_STORE)}
+    return {"status": "ok", "message": "Demo server running."}
