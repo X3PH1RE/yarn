@@ -67,7 +67,10 @@ class QueryAnalysisRequest(BaseModel):
 # --- CORE GEMINI FUNCTIONS ---
 
 async def _transcribe_audio_to_text(audio_file: UploadFile) -> str:
-    """Sends audio file to Gemini for transcription."""
+    """
+    FUNCTION 1 (Transcription): Sends audio file to Gemini for transcription.
+    Returns the raw text.
+    """
     print("Step 1.1: Reading audio bytes...")
     audio_bytes = await audio_file.read()
     
@@ -90,7 +93,10 @@ async def _transcribe_audio_to_text(audio_file: UploadFile) -> str:
 
 
 async def get_contextual_response(full_transcript_text: str, query: str) -> str:
-    """Sends the full transcript text and user query to Gemini for analysis."""
+    """
+    FUNCTION 2 (Analysis): Sends the full transcript text and user query to Gemini for analysis.
+    Returns the final conversational answer.
+    """
     
     # This model name was already correct for analysis
     analysis_model = genai.GenerativeModel('gemini-2.5-flash')
@@ -103,15 +109,14 @@ async def get_contextual_response(full_transcript_text: str, query: str) -> str:
     )
     
     user_prompt = (
-        f"INSTRUCTION: {system_prompt_instruction}\n\n" # FIX: Inject system instruction into the prompt
+        f"INSTRUCTION: {system_prompt_instruction}\n\n" # Inject system instruction into the prompt
         f"MEETING TRANSCRIPT:\n---\n{full_transcript_text}\n---\n\n"
         f"USER QUERY: {query}"
     )
     
     print(f"Step 2.1: Sending context ({len(full_transcript_text)} chars) and query to Gemini for analysis...")
 
-    # FIX: Removed the conflicting 'config' parameter. We pass the system instruction 
-    # directly in the prompt content above for maximum compatibility.
+    # Use asyncio.to_thread to run synchronous SDK method safely in FastAPI's thread pool
     response = await asyncio.to_thread(
         analysis_model.generate_content,
         contents=[user_prompt]
@@ -126,18 +131,17 @@ async def get_contextual_response(full_transcript_text: str, query: str) -> str:
 @app.post("/api/demo/analyze-audio", tags=["Demo - Audio Upload"])
 async def analyze_audio_demo(audio_file: UploadFile = File(...)):
     """
-    Endpoint 1: Uploads an audio file, transcribes it using Gemini, and returns the raw text.
-    The client must use this text for subsequent queries.
+    Endpoint 1: Uploads an audio file, transcribes it using Gemini, and returns the raw text 
+    and an initial summary.
     """
     if audio_file.content_type not in ["audio/mp3", "audio/wav", "audio/mpeg", "audio/webm"]:
          raise HTTPException(status_code=400, detail="Invalid file type. Please upload a common audio file (mp3, wav, etc.).")
     
     try:
-        # Step 1: Transcribe the audio using Gemini
+        # Step 1: Transcribe the audio (using Function 1)
         final_transcript_text = await _transcribe_audio_to_text(audio_file)
 
-        # Step 2: Format the single text into a context list (for client consistency)
-        # We simplify the transcription as one block for this file-based demo.
+        # Step 2: Prepare context for follow-up query
         transcribed_context = [
             DemoTranscriptEntry(
                 timestamp=datetime.now().strftime("%H:%M:%S"),
@@ -146,8 +150,8 @@ async def analyze_audio_demo(audio_file: UploadFile = File(...)):
             )
         ]
         
-        # Step 3: Run a default summary query for the client's immediate viewing
-        initial_query = "Provide a concise summary of this meeting transcript."
+        # Step 3: Run initial summary (using Function 2)
+        initial_query = "Provide a concise summary of this meeting transcript. What is the main action item?"
         initial_analysis = await get_contextual_response(final_transcript_text, initial_query)
 
         return {
@@ -176,14 +180,13 @@ async def query_analysis_demo(request: QueryAnalysisRequest):
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
         
     # Reconstruct the single, continuous transcription text from the context list
-    # Since the initial transcription is returned as one large block, we just join the content.
     full_transcript_text = "\n".join([entry.content for entry in request.transcript_context])
     
     if not full_transcript_text.strip():
         raise HTTPException(status_code=400, detail="Context is empty. Please upload an audio file first.")
 
     try:
-        # Send the continuous text and the new query for contextual analysis
+        # Step 1: Send the continuous text and the new query for contextual analysis (using Function 2)
         analysis_result = await get_contextual_response(full_transcript_text, request.user_query)
         
         return JSONResponse(content={"analysis_result": analysis_result})
