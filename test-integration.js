@@ -85,3 +85,5 @@ console.log('1. Add your API keys to server/.env');
 console.log('2. Start the backend: cd server && npm run dev');
 console.log('3. Start the frontend: npm run dev');
 console.log('4. Open http://localhost:8080 and test the meeting features');
+
+
