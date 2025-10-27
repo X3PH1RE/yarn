@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import {
   Phone, Mic, MicOff, Users, Monitor, Lightbulb, Send,
   Settings, MessageCircle, Volume2, VideoOff, Video, Loader2
@@ -38,7 +38,6 @@ const ScrollArea = ({ children, className }: any) => (
 // --- CONFIGURATION ---
 const API_URL = "http://localhost:8000";
 const WS_URL = "ws://localhost:8000";
-const ROOM_ID = "meeting-123";
 
 type TranscriptLine = {
   user: string;
@@ -234,6 +233,7 @@ const useMeetingPipeline = () => {
 // --- Meeting Component (full) ---
 const Meeting: React.FC = () => {
   const navigate = useNavigate();
+  const { roomId } = useParams<{ roomId: string }>();
   const [message, setMessage] = useState("");
   const [allParticipants, setAllParticipants] = useState<any[]>([]);
   const [activeTab, setActiveTab] = useState<"ai" | "chat" | "participants">("ai");
@@ -249,6 +249,13 @@ const Meeting: React.FC = () => {
   // Check authentication and get user name - redirect if not logged in
   useEffect(() => {
     const checkAuth = async () => {
+      // Check if room ID is provided
+      if (!roomId) {
+        toast.error("Invalid meeting code");
+        navigate("/");
+        return;
+      }
+
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) {
         toast.error("Please sign in to join a meeting");
@@ -261,9 +268,10 @@ const Meeting: React.FC = () => {
       const displayName = user.user_metadata?.full_name || user.email?.split('@')[0] || "Guest";
       setUserName(displayName);
       console.log("👤 User joined:", displayName);
+      console.log("🔑 Meeting code:", roomId);
     };
     checkAuth();
-  }, [navigate]);
+  }, [navigate, roomId]);
 
   // Don't manually add local user - let server handle participant list
   // The server sends PARTICIPANTS_UPDATE with all participants including us
@@ -390,12 +398,13 @@ const Meeting: React.FC = () => {
   useEffect(() => {
     // Wait until userName is loaded from Supabase
     if (userName === "Loading...") return;
+    if (!roomId) return;
     
     const encodedUserName = encodeURIComponent(userName);
-    wsRef.current = new WebSocket(`${WS_URL}/ws/${ROOM_ID}?user_id=${userId.current}&user_name=${encodedUserName}`);
+    wsRef.current = new WebSocket(`${WS_URL}/ws/${roomId}?user_id=${userId.current}&user_name=${encodedUserName}`);
 
     wsRef.current.onopen = async () => {
-      console.log("✅ WebSocket connected. Room ID:", ROOM_ID);
+      console.log("✅ WebSocket connected. Room ID:", roomId);
       setIsConnected(true);
 
       // Acquire local camera + mic
@@ -542,7 +551,7 @@ const Meeting: React.FC = () => {
       localStreamRef.current?.getTracks().forEach(t => t.stop());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userName]); // re-run when userName is loaded
+  }, [userName, roomId]); // re-run when userName is loaded or room ID changes
 
   // React to participants list changes — create offers to new peers
   useEffect(() => {
@@ -712,6 +721,48 @@ const Meeting: React.FC = () => {
     } catch (err) {
       console.error('❌ Screen share error:', err);
     }
+  };
+
+  const handleEndCall = () => {
+    console.log("🛑 Ending call...");
+    
+    // Stop transcription if active
+    if (mediaRecorderRef.current?.state === 'recording') {
+      mediaRecorderRef.current.stop();
+    }
+    
+    // Close WebSocket connection
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+    
+    // Close all peer connections
+    Object.values(peerConnections.current).forEach(pc => {
+      try {
+        pc.close();
+      } catch (err) {
+        console.error("Error closing peer connection:", err);
+      }
+    });
+    peerConnections.current = {};
+    
+    // Stop all local media tracks
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach(track => {
+        track.stop();
+      });
+      localStreamRef.current = null;
+    }
+    
+    // Clear remote streams
+    setRemoteStreams({});
+    
+    // Show toast notification
+    toast.success("Call ended");
+    
+    // Redirect to landing page
+    navigate("/");
   };
 
   const isRecording = isTranscriptionActive;
@@ -901,7 +952,7 @@ const Meeting: React.FC = () => {
                 size="lg"
                 variant="destructive"
                 className="rounded-full w-12 h-12 p-0 bg-red-700 text-white hover:bg-red-800 flex items-center justify-center shadow-lg"
-                onClick={() => alert("Ending meeting...")}
+                onClick={handleEndCall}
               >
                 <Phone className="w-5 h-5" />
               </Button>
