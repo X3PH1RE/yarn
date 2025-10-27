@@ -9,7 +9,8 @@ const HeroSection = () => {
   const navigate = useNavigate();
 
   const handleCreateYarn = () => {
-    const roomId = Math.random().toString(36).slice(2, 8);
+    // Generate a 6-character uppercase room code
+    const roomId = Math.random().toString(36).slice(2, 8).toUpperCase();
     navigate(`/meeting/${roomId}`);
   };
 

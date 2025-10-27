@@ -34,6 +34,8 @@ const ScrollArea = ({ children, className }) => (
 
 // --- CONFIGURATION & API HOOK ---
 const API_URL = "http://localhost:8000";
+const WS_URL = "ws://localhost:8000";
+const ROOM_ID = "meeting-123";
 
 type TranscriptLine = {
     user: string;
@@ -61,7 +63,7 @@ const useMeetingPipeline = () => {
     const mediaStream = useRef<MediaStream | null>(null);
     const audioChunks = useRef<Blob[]>([]);
 
-    // --- Audio Recording & Upload ---
+    // --- Audio Recording & Upload (LOGIC UNCHANGED) ---
 
     const startRecording = useCallback(async () => {
         if (isTranscribing) return;
@@ -83,7 +85,6 @@ const useMeetingPipeline = () => {
                 setStatusMessage("Recording stopped. Sending audio for transcription...");
                 setIsTranscribing(true);
                 
-                // Convert chunks to a single Blob and then to a File
                 const audioBlob = new Blob(audioChunks.current, { type: 'audio/webm' });
                 const audioFile = new File([audioBlob], 'recording.webm', { type: 'audio/webm' });
                 
@@ -115,7 +116,7 @@ const useMeetingPipeline = () => {
     };
 
     const toggleMic = () => {
-        if (mediaRecorder.current?.state === 'recording') { // Check if currently recording
+        if (mediaRecorder.current?.state === 'recording') { 
             stopRecording();
         } else {
             startRecording();
@@ -123,7 +124,7 @@ const useMeetingPipeline = () => {
     };
 
     const sendAudioForAnalysis = async (audioFile: File) => {
-        setIsTranscribing(true); // Keep UI busy during API call
+        setIsTranscribing(true); 
         
         const formData = new FormData();
         formData.append('audio_file', audioFile);
@@ -142,10 +143,8 @@ const useMeetingPipeline = () => {
 
             const data = await response.json();
             
-            // Step 1: Update the transcript panel with the raw transcription
             setAudioData(data.full_context_list);
             
-            // Step 2: Display the initial summary (AI's first response)
             setAiChat([
                 ...aiChat,
                 { user: "Olio", content: `Transcription complete. Summary: ${data.initial_summary}`, isAI: true }
@@ -165,7 +164,7 @@ const useMeetingPipeline = () => {
         }
     };
 
-    // --- Conversational Query Logic (Passes context back to backend) ---
+    // --- Conversational Query Logic (LOGIC UNCHANGED) ---
 
     const handleAiQuery = useCallback(async (queryText: string) => {
         if (audioData.length === 0) {
@@ -177,7 +176,6 @@ const useMeetingPipeline = () => {
         setAiChat(chat => [...chat, { user: "You", content: queryText, isAI: false }]);
         setStatusMessage("Querying context...");
 
-        // Payload contains the full transcription context
         const payload = {
             transcript_context: audioData,
             user_query: queryText
@@ -208,7 +206,6 @@ const useMeetingPipeline = () => {
         }
     }, [audioData, aiChat]);
 
-    // Cleanup effect
     useEffect(() => {
         return () => {
             cleanupMedia();
@@ -222,7 +219,7 @@ const useMeetingPipeline = () => {
         isAiLoading, 
         statusMessage,
         toggleMic,
-        mediaRecorderRef: mediaRecorder, // EXPOSED: Pass ref to the component
+        mediaRecorderRef: mediaRecorder, 
         handleAiQuery 
     };
 };
@@ -230,16 +227,16 @@ const useMeetingPipeline = () => {
 // --- REACT COMPONENT ---
 
 const Meeting = () => {
-    // Dummy states for UI elements not handled by the pipeline hook
     const [message, setMessage] = useState("");
     
-    const participants = [
-        { id: 1, name: "Ashwin VC", isActive: true, isMuted: false },
-        { id: 2, name: "Lekshmi Priya M", isActive: true, isMuted: true },
-        { id: 3, name: "Austin Benny", isActive: true, isMuted: false },
-        { id: 4, name: "Smitha John", isActive: false, isMuted: false },
-    ];
+    // MODIFIED: Single state to hold ALL participants from the server update
+    const [allParticipants, setAllParticipants] = useState([]);
     
+    const userId = useRef(crypto.randomUUID()); 
+    const userName = `User ${userId.current.substring(0, 4)} (You)`;
+    
+    const wsRef = useRef<WebSocket | null>(null);
+
     const { 
         audioData,
         aiChat, 
@@ -247,15 +244,54 @@ const Meeting = () => {
         isAiLoading, 
         statusMessage,
         toggleMic,
-        mediaRecorderRef, // RECEIVE: Get the ref
+        mediaRecorderRef,
         handleAiQuery 
     } = useMeetingPipeline();
 
-    // Refs for auto-scrolling
     const chatEndRef = useRef<HTMLDivElement>(null);
     const transcriptEndRef = useRef<HTMLDivElement>(null);
 
-    // Auto-scroll effects
+
+    // NEW LOGIC: WebSocket connection and signaling
+    useEffect(() => {
+        // Encode user name for URL
+        const encodedUserName = encodeURIComponent(userName);
+
+        // Connect to the room WebSocket
+        wsRef.current = new WebSocket(`${WS_URL}/ws/${ROOM_ID}?user_id=${userId.current}&user_name=${encodedUserName}`);
+        
+        wsRef.current.onopen = () => {
+            console.log("WebSocket connected. Room ID:", ROOM_ID);
+        };
+
+        wsRef.current.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            
+            if (data.type === 'PARTICIPANTS_UPDATE') {
+                // MODIFIED: Set the entire list of participants received from the server
+                setAllParticipants(data.participants);
+            }
+        };
+
+        wsRef.current.onclose = () => {
+            console.log("WebSocket disconnected.");
+            setAllParticipants([]); 
+        };
+
+        wsRef.current.onerror = (error) => {
+            console.error("WebSocket error:", error);
+        };
+
+        // Cleanup function for the component unmount
+        return () => {
+            if (wsRef.current) {
+                wsRef.current.close();
+            }
+        };
+    }, []); 
+    
+
+    // Auto-scroll effects 
     useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [aiChat]);
     useEffect(() => { transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [audioData]);
 
@@ -269,7 +305,6 @@ const Meeting = () => {
         }
     };
     
-    // FIX: Use the exposed mediaRecorderRef instead of a nonexistent variable
     const isRecording = mediaRecorderRef.current?.state === 'recording';
 
     const getMicButtonClass = () => {
@@ -277,51 +312,61 @@ const Meeting = () => {
             return 'bg-red-500 text-white hover:bg-red-600 animate-pulse';
         }
         if (audioData.length > 0) {
-            return 'bg-green-600 text-white hover:bg-green-700'; // Finished recording/transcribing
+            return 'bg-green-600 text-white hover:bg-green-700';
         }
         return 'bg-gray-100 text-gray-700 hover:bg-gray-200';
     };
+
+    // Use the participant list directly
+    const participants = allParticipants;
+    const gridClass = participants.length <= 2 ? 'grid-cols-1 max-w-2xl mx-auto' : 'grid-cols-2';
+
 
     return (
         <div className="min-h-screen bg-gray-50 flex text-gray-800" style={{ fontFamily: 'Inter, sans-serif' }}>
             {/* Main Video Area */}
             <div className="flex-1 flex flex-col p-4">
-                {/* Video Grid (Placeholder) */}
-                <div className="flex-1 grid grid-cols-2 gap-4 mb-4">
-                    {participants.map((participant) => (
-                        <div
-                            key={participant.id}
-                            className="relative bg-gray-100 rounded-xl overflow-hidden aspect-video shadow-lg border-2 border-indigo-200/50"
-                        >
-                            {/* Video placeholder content... */}
-                            <div className="w-full h-full bg-gradient-to-br from-indigo-50/50 to-purple-50/50 flex items-center justify-center">
-                                <div className="text-center">
-                                    <div className="w-16 h-16 bg-indigo-600/80 rounded-full flex items-center justify-center mb-2 mx-auto shadow-md">
-                                        <span className="text-white font-bold text-xl">
-                                            {participant.name.split(' ').map(n => n[0]).join('')}
+                {/* Video Grid (Now dynamically populated) */}
+                <div className={`flex-1 grid gap-4 mb-4 ${gridClass}`}>
+                    {participants.length === 0 ? (
+                        <div className="w-full h-full bg-indigo-50/50 rounded-xl flex items-center justify-center border-dashed border-2 border-indigo-300">
+                             <p className="text-indigo-700 font-medium">Connecting to room...</p>
+                        </div>
+                    ) : (
+                        participants.map((participant) => (
+                            <div
+                                key={participant.id}
+                                // Adjusted the video tile style slightly for multiple users
+                                className={`relative bg-gray-100 rounded-xl overflow-hidden aspect-video shadow-lg border-2 ${participant.id === userId.current ? 'border-indigo-500' : 'border-gray-200'}`}
+                            >
+                                <div className="w-full h-full bg-gradient-to-br from-indigo-50/50 to-purple-50/50 flex items-center justify-center">
+                                    <div className="text-center">
+                                        <div className="w-16 h-16 bg-indigo-600/80 rounded-full flex items-center justify-center mb-2 mx-auto shadow-md">
+                                            <span className="text-white font-bold text-xl">
+                                                {/* Use the participant's name directly */}
+                                                {participant.name.split(' ').map(n => n[0]).join('')}
+                                            </span>
+                                        </div>
+                                        <span className="text-sm font-medium text-gray-700">
+                                            {participant.name}
                                         </span>
                                     </div>
-                                    <span className="text-sm font-medium text-gray-700">
-                                        {participant.name}
-                                    </span>
+                                </div>
+                                
+                                <div className="absolute top-2 right-2 flex items-center space-x-2">
+                                    {participant.isMuted && (
+                                        <div className="w-6 h-6 bg-red-500 rounded-full flex items-center justify-center shadow-md">
+                                            <MicOff className="w-3 h-3 text-white" />
+                                        </div>
+                                    )}
                                 </div>
                             </div>
-                            
-                            {/* User controls overlay... */}
-                            <div className="absolute top-2 right-2 flex items-center space-x-2">
-                                {participant.isMuted && (
-                                    <div className="w-6 h-6 bg-red-500 rounded-full flex items-center justify-center shadow-md">
-                                        <MicOff className="w-3 h-3 text-white" />
-                                    </div>
-                                )}
-                            </div>
-                        </div>
-                    ))}
+                        ))
+                    )}
                 </div>
 
                 {/* Live Transcript and Control Bar */}
                 <div className="flex flex-col space-y-4">
-                    {/* Live Transcript Panel */}
                     <div className="flex-1 p-4 bg-white rounded-xl shadow-lg border border-gray-200 h-40">
                         <h2 className="text-sm font-bold border-b pb-2 mb-2 text-indigo-700 uppercase tracking-wider">
                             Meeting Transcript (File Analysis)
@@ -368,9 +413,8 @@ const Meeting = () => {
                                 {isTranscribing ? <Loader2 className="w-6 h-6 animate-spin" /> : (isRecording ? <MicOff className="w-6 h-6" /> : <Mic className="w-6 h-6" />)}
                             </Button>
                             
-                            {/* Other Controls */}
-                            <Button size="lg" variant="secondary" className="rounded-full w-14 h-14 p-0 bg-gray-100" disabled><VideoOff className="w-6 h-6" /></Button>
-                            <Button size="lg" variant="secondary" className="rounded-full w-14 h-14 p-0 bg-gray-100" disabled><Monitor className="w-6 h-6" /></Button>
+                            <Button size="lg" variant="secondary" className="rounded-full w-14 h-14 p-0 bg-gray-100" ><VideoOff className="w-6 h-6" /></Button>
+                            <Button size="lg" variant="secondary" className="rounded-full w-14 h-14 p-0 bg-gray-100" ><Monitor className="w-6 h-6" /></Button>
                         </div>
                     </div>
                 </div>

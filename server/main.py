@@ -8,8 +8,7 @@ import uuid
 import io
 
 # FastAPI and dependencies
-from fastapi import FastAPI, HTTPException, File, UploadFile, Form
-# FIX: Corrected import casing from 'CORSMiddleware' to 'CORSMiddleware'
+from fastapi import FastAPI, HTTPException, File, UploadFile, Form, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -32,7 +31,6 @@ app = FastAPI(
 
 # --- CORS Configuration ---
 origins = ["*"] # Allow all for local demo testing
-# The class used here (CORSMiddleware) is now correctly imported above.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -49,40 +47,83 @@ try:
 except Exception as e:
     print(f"FATAL: Gemini configuration failed: {e}")
 
+# --- NEW: WebSocket Room Manager (UNCHANGED) ---
 
-# --- Pydantic Models for Demo ---
+class ConnectionManager:
+    def __init__(self):
+        # Dictionary to hold active connections per room: {room_id: [{user_id, user_name, websocket}]}
+        self.active_connections: Dict[str, List[Dict[str, Any]]] = {}
 
-# Model for a single mock transcript entry (timestamp is simple string here)
+    async def connect(self, room_id: str, user_id: str, user_name: str, websocket: WebSocket):
+        await websocket.accept()
+        if room_id not in self.active_connections:
+            self.active_connections[room_id] = []
+        
+        user_info = {"id": user_id, "name": user_name, "websocket": websocket, "isMuted": False, "isActive": True}
+        self.active_connections[room_id].append(user_info)
+        
+        await self.broadcast(room_id, {"type": "STATUS", "message": f"{user_name} joined the room."})
+        await self.send_participant_update(room_id)
+
+    def disconnect(self, room_id: str, websocket: WebSocket):
+        user_name = "Unknown"
+        if room_id in self.active_connections:
+            # Find the user name before disconnecting
+            user = next((conn for conn in self.active_connections[room_id] if conn["websocket"] == websocket), None)
+            if user:
+                user_name = user["name"]
+            
+            # Find and remove the user by WebSocket object
+            self.active_connections[room_id] = [
+                conn for conn in self.active_connections[room_id] if conn["websocket"] != websocket
+            ]
+            if not self.active_connections[room_id]:
+                del self.active_connections[room_id]
+        return user_name
+
+    async def broadcast(self, room_id: str, message: dict):
+        if room_id in self.active_connections:
+            json_message = json.dumps(message)
+            # Use asyncio.wait for concurrent sending
+            await asyncio.gather(*[
+                conn["websocket"].send_text(json_message) for conn in self.active_connections[room_id]
+            ])
+            
+    async def send_participant_update(self, room_id: str):
+        if room_id in self.active_connections:
+            # Prepare the list of participants (excluding the websocket object)
+            participants_list = [
+                {"id": conn["id"], "name": conn["name"], "isMuted": conn["isMuted"], "isActive": conn["isActive"]}
+                for conn in self.active_connections[room_id]
+            ]
+            await self.broadcast(room_id, {"type": "PARTICIPANTS_UPDATE", "participants": participants_list})
+
+manager = ConnectionManager()
+
+# --- Pydantic Models for Demo (UNCHANGED) ---
+
 class DemoTranscriptEntry(BaseModel):
     timestamp: str
-    speaker: str # Added for structural completeness
+    speaker: str 
     content: str
 
-# Model for the incoming query with full context (used by the client for follow-up questions)
 class QueryAnalysisRequest(BaseModel):
     transcript_context: List[DemoTranscriptEntry] = Field(..., description="The full transcribed audio content.")
     user_query: str = Field(..., description="The user's question about the transcript.")
 
 
-# --- CORE GEMINI FUNCTIONS ---
+# --- CORE GEMINI FUNCTIONS (UNCHANGED) ---
 
 async def _transcribe_audio_to_text(audio_file: UploadFile) -> str:
-    """
-    FUNCTION 1 (Transcription): Sends audio file to Gemini for transcription.
-    Returns the raw text.
-    """
     print("Step 1.1: Reading audio bytes...")
     audio_bytes = await audio_file.read()
     
-    # Using the most reliable model for multimodal file processing
     transcription_model = genai.GenerativeModel('gemini-2.5-flash')
     
     audio_part = {"mime_type": audio_file.content_type, "data": audio_bytes}
     
-    # Send the audio part along with the instruction
     print(f"Step 1.2: Sending {audio_file.filename} to Gemini for transcription...")
     
-    # Use asyncio.to_thread to run synchronous SDK method safely in FastAPI's thread pool
     response = await asyncio.to_thread(
         transcription_model.generate_content,
         contents=["Transcribe the audio and return ONLY the raw spoken text.", audio_part]
@@ -93,12 +134,6 @@ async def _transcribe_audio_to_text(audio_file: UploadFile) -> str:
 
 
 async def get_contextual_response(full_transcript_text: str, query: str) -> str:
-    """
-    FUNCTION 2 (Analysis): Sends the full transcript text and user query to Gemini for analysis.
-    Returns the final conversational answer.
-    """
-    
-    # This model name was already correct for analysis
     analysis_model = genai.GenerativeModel('gemini-2.5-flash')
     
     system_prompt_instruction = (
@@ -109,14 +144,13 @@ async def get_contextual_response(full_transcript_text: str, query: str) -> str:
     )
     
     user_prompt = (
-        f"INSTRUCTION: {system_prompt_instruction}\n\n" # Inject system instruction into the prompt
+        f"INSTRUCTION: {system_prompt_instruction}\n\n"
         f"MEETING TRANSCRIPT:\n---\n{full_transcript_text}\n---\n\n"
         f"USER QUERY: {query}"
     )
     
     print(f"Step 2.1: Sending context ({len(full_transcript_text)} chars) and query to Gemini for analysis...")
 
-    # Use asyncio.to_thread to run synchronous SDK method safely in FastAPI's thread pool
     response = await asyncio.to_thread(
         analysis_model.generate_content,
         contents=[user_prompt]
@@ -126,22 +160,16 @@ async def get_contextual_response(full_transcript_text: str, query: str) -> str:
     return response.text.strip()
 
 
-# --- API Endpoints ---
+# --- API Endpoints (UNCHANGED) ---
 
 @app.post("/api/demo/analyze-audio", tags=["Demo - Audio Upload"])
 async def analyze_audio_demo(audio_file: UploadFile = File(...)):
-    """
-    Endpoint 1: Uploads an audio file, transcribes it using Gemini, and returns the raw text 
-    and an initial summary.
-    """
     if audio_file.content_type not in ["audio/mp3", "audio/wav", "audio/mpeg", "audio/webm"]:
-         raise HTTPException(status_code=400, detail="Invalid file type. Please upload a common audio file (mp3, wav, etc.).")
+          raise HTTPException(status_code=400, detail="Invalid file type. Please upload a common audio file (mp3, wav, etc.).")
     
     try:
-        # Step 1: Transcribe the audio (using Function 1)
         final_transcript_text = await _transcribe_audio_to_text(audio_file)
 
-        # Step 2: Prepare context for follow-up query
         transcribed_context = [
             DemoTranscriptEntry(
                 timestamp=datetime.now().strftime("%H:%M:%S"),
@@ -150,43 +178,35 @@ async def analyze_audio_demo(audio_file: UploadFile = File(...)):
             )
         ]
         
-        # Step 3: Run initial summary (using Function 2)
         initial_query = "Provide a concise summary of this meeting transcript. What is the main action item?"
         initial_analysis = await get_contextual_response(final_transcript_text, initial_query)
 
         return {
             "filename": audio_file.filename,
             "transcription_status": "Complete",
-            "transcribed_text": final_transcript_text, # Raw text for follow-up query context
-            "initial_summary": initial_analysis,        # First answer for display
-            "full_context_list": transcribed_context,   # List format for /query-analysis endpoint
+            "transcribed_text": final_transcript_text, 
+            "initial_summary": initial_analysis,        
+            "full_context_list": transcribed_context,   
         }
 
     except HTTPException:
         raise
     except Exception as e:
         print(f"Error during audio processing: {e}")
-        # Return a clear message if the model call failed
         raise HTTPException(status_code=500, detail=f"Failed to process audio file: Gemini API Error. Check your model name or API key.")
 
 
 @app.post("/api/demo/query-analysis", tags=["Demo - Audio Upload"])
 async def query_analysis_demo(request: QueryAnalysisRequest):
-    """
-    Endpoint 2: Takes the full transcribed text context and a new user question, 
-    then sends both to Gemini for dynamic conversation.
-    """
     if not request.user_query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
         
-    # Reconstruct the single, continuous transcription text from the context list
     full_transcript_text = "\n".join([entry.content for entry in request.transcript_context])
     
     if not full_transcript_text.strip():
         raise HTTPException(status_code=400, detail="Context is empty. Please upload an audio file first.")
 
     try:
-        # Step 1: Send the continuous text and the new query for contextual analysis (using Function 2)
         analysis_result = await get_contextual_response(full_transcript_text, request.user_query)
         
         return JSONResponse(content={"analysis_result": analysis_result})
@@ -198,5 +218,28 @@ async def query_analysis_demo(request: QueryAnalysisRequest):
 
 @app.get("/status", tags=["Utility"])
 def get_status():
-    """Simple health check endpoint."""
     return {"status": "ok", "message": "Demo server running."}
+
+
+# NEW ENDPOINT: WebSocket for Signaling/Room Presence (UNCHANGED)
+@app.websocket("/ws/{room_id}")
+async def websocket_endpoint(websocket: WebSocket, room_id: str, user_id: str, user_name: str):
+    user_name = user_name or "Guest"
+    
+    await manager.connect(room_id, user_id, user_name, websocket)
+    
+    try:
+        while True:
+            # This loop keeps the connection alive
+            data = await websocket.receive_text()
+            print(f"Received message from {user_name} in {room_id}: {data}")
+
+    except WebSocketDisconnect:
+        user_name_disconnected = manager.disconnect(room_id, websocket)
+        print(f"{user_name_disconnected} left room {room_id}")
+        await manager.broadcast(room_id, {"type": "STATUS", "message": f"{user_name_disconnected} left the room."})
+        await manager.send_participant_update(room_id)
+    except Exception as e:
+        print(f"An error occurred with user {user_name} in room {room_id}: {e}")
+        manager.disconnect(room_id, websocket)
+        await manager.send_participant_update(room_id)
