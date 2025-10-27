@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import logoImage from "@/assets/ChatGPT_Image_Jul_28__2025__10_52_25_PM-removebg-preview.png";
 import AuthDialog from "./AuthDialog";
@@ -56,22 +57,22 @@ const Header = () => {
   return (
     <>
       <header className="flex items-center justify-between p-6">
-        <div className="flex items-center space-x-3">
+        <Link to="/" className="flex items-center space-x-3">
           <img 
             src={logoImage} 
             alt="Yarn Logo" 
             className="h-12 w-auto"
           />
-        </div>
+        </Link>
         
         <nav className="hidden md:flex items-center space-x-8">
-          <a href="#" className="text-yarn-text hover:text-yarn-dark transition-colors">View Demo</a>
+          <Link to="/demo" className="text-yarn-text hover:text-yarn-dark transition-colors">View Demo</Link>
           <span className="text-yarn-text">|</span>
-          <a href="#" className="text-yarn-text hover:text-yarn-dark transition-colors">Pricing</a>
+          <Link to="/pricing" className="text-yarn-text hover:text-yarn-dark transition-colors">Pricing</Link>
           <span className="text-yarn-text">|</span>
-          <a href="#" className="text-yarn-text hover:text-yarn-dark transition-colors">About</a>
+          <Link to="/about" className="text-yarn-text hover:text-yarn-dark transition-colors">About</Link>
           <span className="text-yarn-text">|</span>
-          <a href="#" className="text-yarn-text hover:text-yarn-dark transition-colors">Contact</a>
+          <Link to="/contact" className="text-yarn-text hover:text-yarn-dark transition-colors">Contact</Link>
         </nav>
         
         <div className="flex items-center space-x-3">

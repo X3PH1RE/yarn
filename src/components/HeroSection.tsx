@@ -110,7 +110,7 @@ const HeroSection = () => {
         <img 
           src={meetingIllustration} 
           alt="Person in a video meeting with multiple participants"
-          className="max-w-md w-full h-auto"
+          className="max-w-xl w-full h-auto"
         />
       </div>
     </section>
