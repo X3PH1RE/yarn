@@ -133,9 +133,16 @@ async def _transcribe_audio_to_text(audio_file: UploadFile) -> str:
 
     audio_part = {"mime_type": audio_file.content_type, "data": audio_bytes}
 
+    prompt = """Listen to the audio and transcribe exactly what is spoken.
+Rules:
+- Return ONLY the spoken words, nothing else
+- Do not add any commentary, explanations, or meta-text
+- Do not say things like "The user wants" or "I will now process"
+- Just output the raw transcription"""
+
     response = await asyncio.to_thread(
         transcription_model.generate_content,
-        contents=["Transcribe the audio and return ONLY the raw spoken text.", audio_part]
+        contents=[prompt, audio_part]
     )
 
     return response.text.strip()

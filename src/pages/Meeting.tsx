@@ -1,8 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Phone, Mic, MicOff, Users, Monitor, Lightbulb, Send,
   Settings, MessageCircle, Volume2, VideoOff, Video, Loader2
 } from "lucide-react";
+import { supabase } from "@/lib/supabase";
+import { toast } from "sonner";
 
 // --- DUMMY COMPONENTS (Required for standalone execution) ---
 const Button = ({ children, onClick, variant, size, className, disabled }: any) => (
@@ -230,6 +233,7 @@ const useMeetingPipeline = () => {
 
 // --- Meeting Component (full) ---
 const Meeting: React.FC = () => {
+  const navigate = useNavigate();
   const [message, setMessage] = useState("");
   const [allParticipants, setAllParticipants] = useState<any[]>([]);
   const [activeTab, setActiveTab] = useState<"ai" | "chat" | "participants">("ai");
@@ -240,11 +244,30 @@ const Meeting: React.FC = () => {
   const [isScreenSharing, setIsScreenSharing] = useState(false);
 
   const userId = useRef<string>(crypto.randomUUID());
-  const userName = `User ${userId.current.substring(0, 4)} (You)`;
+  const [userName, setUserName] = useState<string>("Loading...");
+
+  // Check authentication and get user name - redirect if not logged in
+  useEffect(() => {
+    const checkAuth = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        toast.error("Please sign in to join a meeting");
+        navigate("/");
+        return;
+      }
+      
+      // Set user name from Supabase auth
+      const user = session.user;
+      const displayName = user.user_metadata?.full_name || user.email?.split('@')[0] || "Guest";
+      setUserName(displayName);
+      console.log("👤 User joined:", displayName);
+    };
+    checkAuth();
+  }, [navigate]);
 
   // Show local user immediately in participant list
   useEffect(() => {
-    if (isConnected && allParticipants.length === 0) {
+    if (isConnected && allParticipants.length === 0 && userName !== "Loading...") {
       // Add ourselves to the list if not already there
       setAllParticipants([{
         id: userId.current,
@@ -253,7 +276,7 @@ const Meeting: React.FC = () => {
         isActive: true
       }]);
     }
-  }, [isConnected]);
+  }, [isConnected, userName]);
 
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -327,6 +350,9 @@ const Meeting: React.FC = () => {
 
   // WebSocket & initial local media setup
   useEffect(() => {
+    // Wait until userName is loaded from Supabase
+    if (userName === "Loading...") return;
+    
     const encodedUserName = encodeURIComponent(userName);
     wsRef.current = new WebSocket(`${WS_URL}/ws/${ROOM_ID}?user_id=${userId.current}&user_name=${encodedUserName}`);
 
@@ -447,7 +473,7 @@ const Meeting: React.FC = () => {
       localStreamRef.current?.getTracks().forEach(t => t.stop());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // only once
+  }, [userName]); // re-run when userName is loaded
 
   // React to participants list changes — create offers to new peers
   useEffect(() => {
@@ -751,55 +777,55 @@ const Meeting: React.FC = () => {
 
           {/* Control Bar */}
           <div className="flex justify-center flex-shrink-0">
-            <div className="bg-white rounded-full px-4 py-3 shadow-xl border border-gray-100 flex items-center space-x-4">
+            <div className="bg-white rounded-full px-6 py-4 shadow-xl border border-gray-100 flex items-center space-x-3">
               <Button
                 size="lg"
                 variant="destructive"
-                className="rounded-full w-14 h-14 p-0 bg-red-700 text-white hover:bg-red-800"
+                className="rounded-full w-12 h-12 p-0 bg-red-700 text-white hover:bg-red-800 flex items-center justify-center shadow-lg"
                 onClick={() => alert("Ending meeting...")}
               >
-                <Phone className="w-6 h-6" />
+                <Phone className="w-5 h-5" />
               </Button>
 
               {/* Transcription Button */}
               <Button
                 size="lg"
                 variant="secondary"
-                className={`rounded-full w-14 h-14 p-0 ${getTranscriptionButtonClass()}`}
+                className={`rounded-full w-12 h-12 p-0 flex items-center justify-center shadow-lg ${getTranscriptionButtonClass()}`}
                 onClick={toggleTranscription}
                 disabled={isAiLoading || isTranscribing}
               >
-                {isTranscribing ? <Loader2 className="w-6 h-6 animate-spin" /> : <Lightbulb className="w-6 h-6" />}
+                {isTranscribing ? <Loader2 className="w-5 h-5 animate-spin" /> : <Lightbulb className="w-5 h-5" />}
               </Button>
 
               {/* Mic Button (local mute/unmute) */}
               <Button
                 size="lg"
                 variant="secondary"
-                className={`rounded-full w-14 h-14 p-0 ${getMicButtonClass()}`}
+                className={`rounded-full w-12 h-12 p-0 flex items-center justify-center shadow-lg ${getMicButtonClass()}`}
                 onClick={toggleMic}
               >
-                {isAudioSharing ? <Mic className="w-6 h-6" /> : <MicOff className="w-6 h-6" />}
+                {isAudioSharing ? <Mic className="w-5 h-5" /> : <MicOff className="w-5 h-5" />}
               </Button>
 
               {/* Camera Button */}
               <Button 
                 size="lg" 
                 variant="secondary" 
-                className={`rounded-full w-14 h-14 p-0 ${getCameraButtonClass()}`}
+                className={`rounded-full w-12 h-12 p-0 flex items-center justify-center shadow-lg ${getCameraButtonClass()}`}
                 onClick={toggleCamera}
               >
-                {isCameraOn ? <Video className="w-6 h-6" /> : <VideoOff className="w-6 h-6" />}
+                {isCameraOn ? <Video className="w-5 h-5" /> : <VideoOff className="w-5 h-5" />}
               </Button>
 
               {/* Screen Share Button */}
               <Button 
                 size="lg" 
                 variant="secondary" 
-                className={`rounded-full w-14 h-14 p-0 ${getScreenShareButtonClass()}`}
+                className={`rounded-full w-12 h-12 p-0 flex items-center justify-center shadow-lg ${getScreenShareButtonClass()}`}
                 onClick={toggleScreenShare}
               >
-                <Monitor className="w-6 h-6" />
+                <Monitor className="w-5 h-5" />
               </Button>
             </div>
           </div>
@@ -817,7 +843,7 @@ const Meeting: React.FC = () => {
             onClick={() => setActiveTab("ai")}
           >
             <Lightbulb className="w-4 h-4 inline mr-1" />
-            AI Assistant
+            Olio
           </button>
           <button
             className={`flex-1 py-3 px-4 text-sm font-semibold transition-colors ${
@@ -843,7 +869,7 @@ const Meeting: React.FC = () => {
         {activeTab === "ai" && (
           <div className="flex-1 flex flex-col overflow-hidden">
             <div className="p-4 border-b border-gray-200 flex-none">
-              <h3 className="font-extrabold text-xl text-indigo-700">AI Assistant</h3>
+              <h3 className="font-extrabold text-xl text-indigo-700">Olio - Your Meeting Assistant</h3>
               <div className="flex items-center space-x-2 text-sm text-gray-600 bg-indigo-50 p-2 rounded-lg mt-2">
                 <Volume2 className="w-4 h-4 text-indigo-500" />
                 <span>{isAiLoading ? 'AI is thinking...' : statusMessage}</span>
