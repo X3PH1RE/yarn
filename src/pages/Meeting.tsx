@@ -265,18 +265,8 @@ const Meeting: React.FC = () => {
     checkAuth();
   }, [navigate]);
 
-  // Show local user immediately in participant list
-  useEffect(() => {
-    if (isConnected && allParticipants.length === 0 && userName !== "Loading...") {
-      // Add ourselves to the list if not already there
-      setAllParticipants([{
-        id: userId.current,
-        name: userName,
-        isMuted: !isAudioSharing,
-        isActive: true
-      }]);
-    }
-  }, [isConnected, userName]);
+  // Don't manually add local user - let server handle participant list
+  // The server sends PARTICIPANTS_UPDATE with all participants including us
 
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -306,14 +296,23 @@ const Meeting: React.FC = () => {
 
   // Create RTCPeerConnection helper
   const createPeerConnection = async (remoteId: string) => {
-    if (peerConnections.current[remoteId]) return peerConnections.current[remoteId];
+    if (peerConnections.current[remoteId]) {
+      console.log(`  ♻️ Reusing existing peer connection for ${remoteId}`);
+      return peerConnections.current[remoteId];
+    }
 
+    console.log(`  🆕 Creating new peer connection for ${remoteId}`);
     const pc = new RTCPeerConnection({
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+      ],
     });
 
     pc.onicecandidate = (event) => {
       if (event.candidate) {
+        console.log(`❄️ ICE candidate for ${remoteId}:`, event.candidate.type);
         wsRef.current?.send(JSON.stringify({
           type: 'ice-candidate',
           to: remoteId,
@@ -323,13 +322,41 @@ const Meeting: React.FC = () => {
       }
     };
 
+    pc.onicegatheringstatechange = () => {
+      console.log(`❄️ ICE gathering state for ${remoteId}: ${pc.iceGatheringState}`);
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      console.log(`🧊 ICE connection state for ${remoteId}: ${pc.iceConnectionState}`);
+    };
+
     pc.ontrack = (event) => {
       // event.streams[0] is the remote MediaStream
-      setRemoteStreams(prev => ({ ...prev, [remoteId]: event.streams[0] }));
+      console.log(`📺 Received remote ${event.track.kind} track from ${remoteId}`);
+      console.log(`  Stream ID: ${event.streams[0]?.id}`);
+      console.log(`  Track readyState: ${event.track.readyState}`);
+      console.log(`  Track enabled: ${event.track.enabled}`);
+      
+      if (event.streams && event.streams[0]) {
+        const stream = event.streams[0];
+        console.log(`  ➕ Adding remote stream for ${remoteId} with ${stream.getTracks().length} tracks`);
+        
+        setRemoteStreams(prev => {
+          const updated = { ...prev, [remoteId]: stream };
+          console.log(`  📋 Updated remote streams:`, Object.keys(updated));
+          return updated;
+        });
+      } else {
+        console.error(`  ❌ No stream in ontrack event for ${remoteId}`);
+      }
     };
 
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+      console.log(`🔌 Connection state for ${remoteId}: ${pc.connectionState}`);
+      if (pc.connectionState === 'connected') {
+        console.log(`✅ Successfully connected to ${remoteId}`);
+      } else if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+        console.log(`❌ Connection ${pc.connectionState} for ${remoteId}`);
         delete peerConnections.current[remoteId];
         setRemoteStreams(prev => {
           const copy = { ...prev };
@@ -339,10 +366,21 @@ const Meeting: React.FC = () => {
       }
     };
 
-    // Add local tracks
-    localStreamRef.current?.getTracks().forEach(track => {
-      try { pc.addTrack(track, localStreamRef.current as MediaStream); } catch (e) { /* ignore */ }
-    });
+    // Add local tracks to the peer connection
+    if (localStreamRef.current) {
+      const tracks = localStreamRef.current.getTracks();
+      console.log(`  📤 Adding ${tracks.length} local tracks to peer connection for ${remoteId}`);
+      tracks.forEach(track => {
+        try {
+          const sender = pc.addTrack(track, localStreamRef.current as MediaStream);
+          console.log(`    ✓ Added ${track.kind} track`);
+        } catch (e) {
+          console.error(`    ❌ Failed to add ${track.kind} track:`, e);
+        }
+      });
+    } else {
+      console.warn(`  ⚠️ No local stream available to add tracks for ${remoteId}`);
+    }
 
     peerConnections.current[remoteId] = pc;
     return pc;
@@ -385,7 +423,13 @@ const Meeting: React.FC = () => {
       // Participants update (keeps existing behavior)
       if (data.type === 'PARTICIPANTS_UPDATE') {
         console.log("👥 Participants update:", data.participants);
+        console.log("👤 My user ID:", userId.current);
         setAllParticipants(data.participants);
+        
+        // Log for debugging
+        data.participants.forEach((p: any) => {
+          console.log(`  - ${p.name} (${p.id}) ${p.id === userId.current ? '← ME' : ''}`);
+        });
       }
 
       // Legacy status messages
@@ -414,25 +458,49 @@ const Meeting: React.FC = () => {
         // incoming offer -> create PC, setRemote, create answer
         const fromId = data.from;
         const offer = data.offer;
-        const pc = await createPeerConnection(fromId);
-        await pc.setRemoteDescription(new RTCSessionDescription(offer));
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
+        console.log(`📨 Received OFFER from ${fromId}`);
+        console.log(`  Offer SDP type: ${offer.type}`);
+        
+        try {
+          const pc = await createPeerConnection(fromId);
+          console.log(`  Setting remote description...`);
+          await pc.setRemoteDescription(new RTCSessionDescription(offer));
+          
+          console.log(`  Creating answer...`);
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
 
-        wsRef.current?.send(JSON.stringify({
-          type: 'answer',
-          to: fromId,
-          from: userId.current,
-          answer: pc.localDescription
-        }));
+          console.log(`📤 Sending ANSWER to ${fromId}`);
+          wsRef.current?.send(JSON.stringify({
+            type: 'answer',
+            to: fromId,
+            from: userId.current,
+            answer: pc.localDescription
+          }));
+        } catch (err) {
+          console.error(`❌ Error handling offer from ${fromId}:`, err);
+        }
       }
 
       if (data.type === 'answer' && data.to === userId.current) {
         const fromId = data.from;
         const answer = data.answer;
+        console.log(`📨 Received ANSWER from ${fromId}`);
+        console.log(`  Answer SDP type: ${answer.type}`);
+        
         const pc = peerConnections.current[fromId];
         if (pc) {
-          await pc.setRemoteDescription(new RTCSessionDescription(answer));
+          try {
+            console.log(`  Setting remote description (answer)...`);
+            await pc.setRemoteDescription(new RTCSessionDescription(answer));
+            console.log(`✅ Peer connection established with ${fromId}`);
+            console.log(`  Connection state: ${pc.connectionState}`);
+            console.log(`  ICE connection state: ${pc.iceConnectionState}`);
+          } catch (err) {
+            console.error(`❌ Error setting remote description:`, err);
+          }
+        } else {
+          console.warn(`⚠️ No peer connection found for ${fromId} when receiving answer`);
         }
       }
 
@@ -443,6 +511,7 @@ const Meeting: React.FC = () => {
         if (pc) {
           try {
             await pc.addIceCandidate(new RTCIceCandidate(candidate));
+            console.log(`❄️ Added ICE candidate from ${fromId}`);
           } catch (err) {
             console.warn("Failed to add ICE candidate:", err);
           }
@@ -479,15 +548,34 @@ const Meeting: React.FC = () => {
   useEffect(() => {
     (async () => {
       if (!wsRef.current) return;
+      if (!localStreamRef.current) {
+        console.log("⚠️ Local stream not ready yet, waiting...");
+        return;
+      }
+      
+      console.log("🔗 Creating peer connections. All participants:", allParticipants.length);
+      
       for (const p of allParticipants) {
-        if (p.id === userId.current) continue;
-        if (peerConnections.current[p.id]) continue; // already connected/connecting
+        if (p.id === userId.current) {
+          console.log(`  ⏭️ Skipping myself (${p.name})`);
+          continue;
+        }
+        if (peerConnections.current[p.id]) {
+          console.log(`  ✓ Already connected to ${p.name}`);
+          continue;
+        }
 
+        console.log(`  🤝 Creating connection to ${p.name} (${p.id})`);
         try {
           const pc = await createPeerConnection(p.id);
+          console.log(`  Creating offer...`);
           const offer = await pc.createOffer();
           await pc.setLocalDescription(offer);
 
+          console.log(`  📤 Sending offer to ${p.name}`);
+          console.log(`    Offer type: ${offer.type}`);
+          console.log(`    Has local tracks: ${pc.getSenders().length} senders`);
+          
           wsRef.current.send(JSON.stringify({
             type: 'offer',
             to: p.id,
@@ -495,7 +583,7 @@ const Meeting: React.FC = () => {
             offer: pc.localDescription
           }));
         } catch (err) {
-          console.error("Failed to create offer to", p.id, err);
+          console.error(`  ❌ Failed to create offer to ${p.name}:`, err);
         }
       }
     })();
@@ -653,6 +741,12 @@ const Meeting: React.FC = () => {
   const participants = allParticipants;
   const gridClass = participants.length <= 2 ? 'grid-cols-1 max-w-2xl mx-auto' : 'grid-cols-2';
 
+  // Debug log for rendering
+  console.log('🎨 Rendering Meeting component');
+  console.log(`  Participants: ${participants.length}`, participants.map(p => p.name));
+  console.log(`  Remote streams:`, Object.keys(remoteStreams));
+  console.log(`  Peer connections:`, Object.keys(peerConnections.current));
+
   return (
     <div className="h-screen bg-gray-50 flex text-gray-800 overflow-hidden" style={{ fontFamily: 'Inter, sans-serif' }}>
       {/* Main Video Area */}
@@ -694,13 +788,38 @@ const Meeting: React.FC = () => {
                   ) : (
                     remoteStreams[participant.id] ? (
                       <video
+                        key={participant.id}
                         autoPlay
                         playsInline
+                        muted={false}
                         ref={(el) => {
-                          if (!el) return;
-                          if (el.srcObject !== remoteStreams[participant.id]) {
-                            el.srcObject = remoteStreams[participant.id];
+                          if (!el) {
+                            console.log(`🎥 Video element removed for ${participant.name}`);
+                            return;
                           }
+                          const stream = remoteStreams[participant.id];
+                          if (!stream) {
+                            console.warn(`⚠️ No stream available for ${participant.name} in ref callback`);
+                            return;
+                          }
+                          if (el.srcObject !== stream) {
+                            console.log(`🎥 Setting video srcObject for ${participant.name}`);
+                            el.srcObject = stream;
+                            console.log(`  Stream ID: ${stream.id}`);
+                            console.log(`  Tracks in stream: ${stream.getTracks().length}`);
+                            stream.getTracks().forEach(track => {
+                              console.log(`    - ${track.kind}: ${track.enabled ? 'enabled' : 'disabled'}, readyState: ${track.readyState}`);
+                            });
+                          }
+                        }}
+                        onLoadedMetadata={(e) => {
+                          console.log(`✅ Video metadata loaded for ${participant.name}`);
+                          const video = e.target as HTMLVideoElement;
+                          console.log(`  Video readyState: ${video.readyState}`);
+                          console.log(`  Video paused: ${video.paused}`);
+                          video.play().catch(err => {
+                            console.error(`❌ Failed to play video for ${participant.name}:`, err);
+                          });
                         }}
                         className="w-full h-full object-cover"
                       />
@@ -714,7 +833,7 @@ const Meeting: React.FC = () => {
                         <span className="text-sm font-medium text-gray-700">
                           {participant.name}
                         </span>
-                        <p className="text-xs text-gray-500 mt-2">Connecting...</p>
+                        <p className="text-xs text-gray-500 mt-2">Waiting for video...</p>
                       </div>
                     )
                   )}
